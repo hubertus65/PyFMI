@@ -312,7 +312,14 @@ class Test_FMUModelME2_Simulation:
         model.get_ode_sizes = lambda: (PYFMI_JACOBIAN_LIMIT+1, 0)
         run_case(True)
 
+        # solvers with their own dense finite-difference Jacobian get the coloured one too
         opts["solver"] = "Radau5ODE"
+        run_case(True)
+
+        opts["solver"] = "RodasODE"
+        run_case(True)
+
+        opts["solver"] = "LSODAR"
         run_case(False)
 
         opts["solver"] = "CVode"

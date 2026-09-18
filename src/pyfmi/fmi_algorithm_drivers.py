@@ -43,6 +43,8 @@ from timeit import default_timer as timer
 PYFMI_JACOBIAN_LIMIT = 10
 PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT = 100
 PYFMI_JACOBIAN_SPARSE_NNZ_LIMIT  = 0.15 #In percentage
+PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE") # get with_jacobian by default (see below)
+PYFMI_SPARSE_JACOBIAN_SOLVERS = ("CVode", "Radau5ODE")             # ... and support linear_solver = "SPARSE"
 
 class FMIResult(JMResultBase):
     def __init__(self, model=None, result_file_name=None, solver=None,
@@ -547,9 +549,12 @@ class AssimuloFMIAlg(AlgorithmBase):
                 self.with_jacobian = True
             else:
                 fnbr, _ = self.model.get_ode_sizes()
-                if fnbr >= PYFMI_JACOBIAN_LIMIT and solver == "CVode":
+                # Solvers that evaluate the Jacobian themselves by dense finite differences
+                # (nx rhs calls per Jacobian) benefit from the structure-aware (coloured)
+                # Jacobian of FMIODE2 just like CVode; RodasODE needs one every step.
+                if fnbr >= PYFMI_JACOBIAN_LIMIT and solver in PYFMI_JACOBIAN_SOLVERS:
                     self.with_jacobian = True
-                    if fnbr >= PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT:
+                    if fnbr >= PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT and solver in PYFMI_SPARSE_JACOBIAN_SOLVERS:
                         try:
                             self.solver_options["linear_solver"]
                         except KeyError:
