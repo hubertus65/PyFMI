@@ -60,6 +60,40 @@ def _state_kind(name):
     return re.sub(r"\[[^\]]*\]", "", name).rsplit(".", 1)[-1]
 
 
+OCT_BLOCK_CHECK_OPTIONS = {"_block_jacobian_check": True, "_log_level": 4}
+
+
+def enable_oct_block_jacobian_check(model, tol=1e-4):
+    """
+    On an OCT-generated FMU (runtime parameters '_block_jacobian_check', '_log_level'
+    present) switch on the FMU's own comparison of analytic vs finite-difference block
+    Jacobians and verbose logging, before initialization. Returns True if the FMU has
+    the options. Afterwards, count_oct_block_warnings(log_file) says which nonlinear
+    blocks reported a singular Jacobian in a directional-derivative solve -- the
+    typical cause of directional derivatives that are silently zero.
+    """
+    names = set(model.get_model_variables(causality=0).keys())
+    if not set(OCT_BLOCK_CHECK_OPTIONS) <= names:
+        return False
+    for k, v in OCT_BLOCK_CHECK_OPTIONS.items():
+        model.set(k, v)
+    if "_block_jacobian_check_tol" in names:
+        model.set("_block_jacobian_check_tol", tol)
+    return True
+
+
+def count_oct_block_warnings(log_file):
+    """{block id: number of 'SingularJacobian ... dir_block' warnings} from an FMU log file."""
+    counts = {}
+    with open(log_file, errors="replace") as f:
+        for line in f:
+            if "SingularJacobian" in line and "dir_block" in line:
+                m = re.search(r'name="dir_block">"?([^"<]+)"?', line)
+                key = m.group(1) if m else "?"
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def check_jacobian(model, times=(), threshold=1e-2, rtol=1e-6, solver="CVode", n_worst=10):
     """
     Compares the FMU's directional derivatives (DD) with coloured finite
@@ -220,6 +254,9 @@ def main(argv=None):
     j.add_argument("--rtol", type=float, default=1e-6)
     j.add_argument("--worst", type=int, default=10, help="number of worst entries to list per point")
     j.add_argument("--log-level", type=int, default=2)
+    j.add_argument("--oct-block-check", action="store_true",
+                   help="OCT FMUs: also switch on the FMU's internal block-Jacobian check and report nonlinear "
+                        "blocks whose directional-derivative solve had a singular Jacobian (log in <fmu>.jaccheck.log)")
     c = sub.add_parser("compare", help="deviation of one result file from another, per variable group")
     c.add_argument("ref", help="reference result (.mat or .txt)")
     c.add_argument("other")
@@ -232,10 +269,25 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.cmd == "jacobian":
+        import os
         from pyfmi import load_fmu
-        model = load_fmu(args.fmu, log_level=args.log_level)
+        log_file = os.path.basename(args.fmu) + ".jaccheck.log"
+        if args.oct_block_check:
+            model = load_fmu(args.fmu, log_level=4, log_file_name=log_file)
+            if not enable_oct_block_jacobian_check(model):
+                print("--oct-block-check: not an OCT FMU (no '_block_jacobian_check' parameter); ignored")
+                args.oct_block_check = False
+        else:
+            model = load_fmu(args.fmu, log_level=args.log_level)
         res = check_jacobian(model, times=args.time, threshold=args.threshold, rtol=args.rtol, n_worst=args.worst)
         print(format_jacobian_report(res, args.fmu))
+        if args.oct_block_check:
+            counts = count_oct_block_warnings(log_file)
+            if counts:
+                print("  OCT block check: singular Jacobian in directional-derivative solves of block(s) " +
+                      ", ".join("%s (%d times)" % kv for kv in sorted(counts.items())) + "  [%s]" % log_file)
+            else:
+                print("  OCT block check: no singular directional-derivative block solves reported  [%s]" % log_file)
         return 0 if res["ok"] else 1
 
     ref, other = _FileResult(args.ref), _FileResult(args.other)
