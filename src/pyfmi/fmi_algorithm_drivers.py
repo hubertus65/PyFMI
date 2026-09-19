@@ -41,7 +41,11 @@ from pyfmi.exceptions import FMUException, InvalidOptionException, TimeLimitExce
 from timeit import default_timer as timer
 
 PYFMI_JACOBIAN_LIMIT = 10
-PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT = 100
+# Below this number of states the sparse linear solver (SuperLU) does not pay: the dense
+# LU is a few milliseconds while every Jacobian evaluation costs 100-240 rhs calls and
+# the dense-to-CSC conversion is done on each of them. Measured at rtol 1e-6: 86 states
+# 2x slower, 226/318 states (density 0.13-0.24) a wash, 16-state switched circuit 8x slower.
+PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT = 1000
 PYFMI_JACOBIAN_SPARSE_NNZ_LIMIT  = 0.15 #In percentage
 PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE") # get with_jacobian by default (see below)
 PYFMI_SPARSE_JACOBIAN_SOLVERS = ("CVode", "Radau5ODE")             # ... and support linear_solver = "SPARSE"
