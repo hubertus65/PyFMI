@@ -21,9 +21,16 @@ command line::
 
     python -m pyfmi.checks jacobian model.fmu [--time T ...] [--threshold 1e-2]
 
+    python -m pyfmi.checks compare ref.mat other.mat [--vars PATTERN] [--group NAME=REGEX ...]
+
 check_jacobian(): compares the FMU's directional derivatives against coloured
 finite differences (forward and central) at one or more points on a trajectory
 and reports entries that the directional derivatives get wrong or leave out.
+
+compare_results(): deviation of one simulation result from another, per
+variable and per variable group (by default controller-like names against the
+rest), so that one badly resolved state -- typically an integrator sitting at a
+limiter -- does not hide how the plant states agree.
 """
 
 import argparse
@@ -213,14 +220,177 @@ def main(argv=None):
     j.add_argument("--rtol", type=float, default=1e-6)
     j.add_argument("--worst", type=int, default=10, help="number of worst entries to list per point")
     j.add_argument("--log-level", type=int, default=2)
+    c = sub.add_parser("compare", help="deviation of one result file from another, per variable group")
+    c.add_argument("ref", help="reference result (.mat or .txt)")
+    c.add_argument("other")
+    c.add_argument("--vars", default=None, help="regex selecting the variables to compare (default: all common ones)")
+    c.add_argument("--group", action="append", default=[], metavar="NAME=REGEX",
+                   help="variable group by regex (repeatable; default: controller-like names vs. the rest)")
+    c.add_argument("--threshold", type=float, default=1e-3)
+    c.add_argument("--floor", type=float, default=1e-6, help="lower bound of the per-variable scale")
+    c.add_argument("--worst", type=int, default=10)
     args = ap.parse_args(argv)
 
-    from pyfmi import load_fmu
-    model = load_fmu(args.fmu, log_level=args.log_level)
-    res = check_jacobian(model, times=args.time, threshold=args.threshold, rtol=args.rtol, n_worst=args.worst)
-    print(format_jacobian_report(res, args.fmu))
-    return 0 if res["ok"] else 1
+    if args.cmd == "jacobian":
+        from pyfmi import load_fmu
+        model = load_fmu(args.fmu, log_level=args.log_level)
+        res = check_jacobian(model, times=args.time, threshold=args.threshold, rtol=args.rtol, n_worst=args.worst)
+        print(format_jacobian_report(res, args.fmu))
+        return 0 if res["ok"] else 1
+
+    ref, other = _FileResult(args.ref), _FileResult(args.other)
+    names = [n for n in ref.keys() if n in set(other.keys())]
+    if args.vars:
+        names = [n for n in names if re.search(args.vars, n)]
+    groups = dict(g.split("=", 1) for g in args.group) if args.group else None
+    res = compare_results(ref, other, names=names, groups=groups, scale_floor=args.floor,
+                          threshold=args.threshold, n_worst=args.worst)
+    print(format_compare_report(res, args.ref, args.other))
+    return 0 if res["max"] <= args.threshold else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# --------------------------------------------------------------------------- trajectories
+
+DEFAULT_GROUPS = {
+    # a PI/PID integrator whose output sits at a limiter feeds nothing back to the plant,
+    # so its local error accumulates unchecked; such states dominate max-norm deviations
+    "controller": r"(?i)control|regulat|\bPI\b|PID|limiter|integrator|antiwindup|anti_windup|\.I\.|\.x_?i\b",
+}
+
+
+def _as_arrays(result, names=None):
+    """(t, {name: values}) from a PyFMI result object, a (t, {name: values}) pair or a
+    (t, Y, names) triple."""
+    if isinstance(result, tuple) and len(result) == 3:
+        t, Y, nms = result
+        return np.asarray(t, float), {n: np.asarray(Y)[:, k] for k, n in enumerate(nms)}
+    if isinstance(result, tuple) and len(result) == 2:
+        t, d = result
+        return np.asarray(t, float), {n: np.asarray(v, float) for n, v in d.items()}
+    t = np.asarray(result["time"], float)
+    if names is None:
+        names = [n for n in result.keys() if n != "time"] if hasattr(result, "keys") else []
+    return t, {n: np.asarray(result[n], float) for n in names}
+
+
+def compare_results(ref, other, names=None, groups=None, scale_floor=None, threshold=1e-3, n_worst=10,
+                    grid=None):
+    """
+    Deviation of 'other' from 'ref', per variable and per variable group.
+
+    Both results are sampled on a common grid (by default the reference's time
+    points inside the common interval; the last stored value is taken at
+    duplicate times, i.e. the post-event value) and compared as
+    |other - ref| / scale, with scale = max(max|ref|, floor) per variable.
+
+    Parameters::
+
+        ref, other --
+            PyFMI result objects (anything indexable by variable name with a
+            "time" entry), (time, {name: values}) pairs or (time, Y, names).
+
+        names --
+            Variables to compare (default: all variables present in both).
+
+        groups --
+            {group name: regex} deciding the group of a variable by the first
+            regex that matches its name; unmatched variables go to "other".
+            Default: DEFAULT_GROUPS (controller-like names vs. the rest).
+
+        scale_floor --
+            {name: floor} or a scalar: lower bound of the per-variable scale
+            (e.g. the state nominals, or the absolute tolerance). Default: 1e-6.
+
+        threshold --
+            Deviation above which a variable is counted in 'n_above'.
+
+        grid --
+            Explicit time grid to compare on (default: the reference's times).
+
+    Returns::
+
+        dict with 'max' (overall), 'groups' {name: {'max', 'median', 'n', 'n_above',
+        'worst': (variable, deviation, time)}}, 'variables' {name: (deviation, time)},
+        'worst' [(variable, deviation, time, group), ...] and 'grid' (t0, tf, n).
+    """
+    t_a, A = _as_arrays(ref, names)
+    t_b, B = _as_arrays(other, names)
+    common = [n for n in A if n in B] if names is None else list(names)
+    if groups is None:
+        groups = DEFAULT_GROUPS
+    if grid is None:
+        t0, tf = max(t_a[0], t_b[0]), min(t_a[-1], t_b[-1])
+        grid = t_a[(t_a >= t0) & (t_a <= tf)]
+    grid = np.asarray(grid, float)
+
+    def sample(t, y):
+        # last stored value at each grid time (post-event value where an event lands on it)
+        idx = np.clip(np.searchsorted(t, grid * (1 + 1e-12) + 1e-300, side="right") - 1, 0, len(t) - 1)
+        return y[idx]
+
+    def floor_of(n):
+        if scale_floor is None:
+            return 1e-6
+        if isinstance(scale_floor, dict):
+            return float(scale_floor.get(n, 1e-6))
+        return float(scale_floor)
+
+    def group_of(n):
+        for g, pattern in groups.items():
+            if re.search(pattern, n):
+                return g
+        return "other"
+
+    variables, per_group = {}, {}
+    for n in common:
+        ya, yb = sample(t_a, A[n]), sample(t_b, B[n])
+        scale = max(float(np.max(np.abs(ya))) if ya.size else 0.0, floor_of(n), 1e-300)
+        e = np.abs(yb - ya) / scale
+        k = int(np.argmax(e)) if e.size else 0
+        dev, t_dev = (float(e[k]), float(grid[k])) if e.size else (0.0, float("nan"))
+        variables[n] = (dev, t_dev)
+        per_group.setdefault(group_of(n), []).append((n, dev, t_dev))
+
+    out_groups = {}
+    for g, items in per_group.items():
+        devs = np.array([d for _, d, _ in items])
+        worst = max(items, key=lambda it: it[1])
+        out_groups[g] = {"n": len(items), "max": float(devs.max()), "median": float(np.median(devs)),
+                         "n_above": int((devs > threshold).sum()), "worst": worst}
+    worst = sorted(((n, d, t, group_of(n)) for n, (d, t) in variables.items()), key=lambda it: -it[1])[:n_worst]
+    return {"max": max((d for d, _ in variables.values()), default=0.0), "groups": out_groups,
+            "variables": variables, "worst": worst, "threshold": threshold,
+            "grid": (float(grid[0]) if grid.size else float("nan"), float(grid[-1]) if grid.size else float("nan"), int(grid.size)),
+            "n": len(common)}
+
+
+def format_compare_report(res, ref_name="reference", other_name="other"):
+    lines = ["Deviation of %s from %s: max %.2e over %d variables, %d grid points in [%g, %g]" % (
+        other_name, ref_name, res["max"], res["n"], res["grid"][2], res["grid"][0], res["grid"][1])]
+    for g, r in sorted(res["groups"].items(), key=lambda kv: -kv[1]["max"]):
+        lines.append("  %-12s n = %4d  max %.2e  median %.2e  > %.0e: %d   worst: %s @ t = %g" % (
+            g, r["n"], r["max"], r["median"], res["threshold"], r["n_above"], r["worst"][0], r["worst"][2]))
+    for n, d, t, g in res["worst"]:
+        lines.append("      %.2e  %-12s %s @ t = %g" % (d, g, n, t))
+    return "\n".join(lines)
+
+
+def _load_result_file(path):
+    from pyfmi.common.io import ResultDymolaBinary, ResultDymolaTextual
+    return ResultDymolaBinary(path) if path.endswith(".mat") else ResultDymolaTextual(path)
+
+
+class _FileResult:
+    """Indexable view of a result file for compare_results()."""
+    def __init__(self, path):
+        self._r = _load_result_file(path)
+
+    def keys(self):
+        return [n for n in self._r.get_variable_names()]
+
+    def __getitem__(self, name):
+        return self._r.get_variable_data(name).x if name != "time" else self._r.get_variable_data("time").x
