@@ -330,6 +330,89 @@ class Test_FMUModelME2_Simulation:
         opts["with_jacobian"] = True
         run_case(True, True)
 
+    def test_jacobian_mode_option(self):
+        """'jacobian_mode': directional derivatives vs coloured finite differences."""
+        import time as _time
+        model = Dummy_FMUModelME2([], os.path.join(file_path, "files", "FMUs", "XML", "ME2.0", "BasicSens1.fmu"), _connect_dll=False)
+        caps = model.get_capability_flags()
+        model.get_capability_flags = lambda: caps
+        cost = {"rhs": 0.0, "dd": 0.0}
+
+        def rhs(*args, **kwargs):
+            _time.sleep(cost["rhs"])
+            return np.array([model.continuous_states[0]])
+
+        def dd(*args, **kwargs):
+            _time.sleep(cost["dd"])
+            return np.array([1.0])
+
+        model.get_derivatives = rhs
+        model.get_directional_derivative = dd
+        opts = model.simulate_options()
+        opts["result_handling"] = None
+        opts["with_jacobian"] = True
+
+        def run_case(expected_mode, expected_force_fd, solver="CVode", rtol=1e-6):
+            model.reset()
+            opts["solver"] = solver
+            opts[solver + "_options"]["rtol"] = rtol
+            alg = NoSolveAlg(0.0, 1.0, (), model, opts)
+            assert alg.jacobian_mode == expected_mode, alg.jacobian_mode
+            assert model.force_finite_differences == expected_force_fd, model.force_finite_differences
+
+        # no directional derivatives: always finite differences, nothing to force
+        caps["providesDirectionalDerivatives"] = False
+        for mode in ("auto", "dd", "fd"):
+            opts["jacobian_mode"] = mode
+            run_case("fd", 0)
+
+        caps["providesDirectionalDerivatives"] = True
+        model._provides_directional_derivatives = lambda: True
+        opts["jacobian_mode"] = "dd"
+        run_case("dd", 0)
+        opts["jacobian_mode"] = "fd"
+        run_case("fd", True)
+
+        # auto: decided by the measured cost of a directional derivative vs an rhs
+        opts["jacobian_mode"] = "auto"
+        cost["rhs"], cost["dd"] = 0.0, 0.002
+        run_case("fd", True)
+        cost["rhs"], cost["dd"] = 0.002, 0.0
+        run_case("dd", 0)
+        # a cheap directional derivative stays exact even if the rhs is cheaper still
+        import pyfmi.fmi_algorithm_drivers as fad
+        floor = fad.PYFMI_JACOBIAN_FD_MIN_DD_TIME
+        fad.PYFMI_JACOBIAN_FD_MIN_DD_TIME = 1.0
+        try:
+            run_case("dd", 0)
+        finally:
+            fad.PYFMI_JACOBIAN_FD_MIN_DD_TIME = floor
+        # ... except when the solver needs the exact Jacobian or the tolerance is tight
+        cost["rhs"], cost["dd"] = 0.0, 0.002
+        run_case("dd", 0, solver="RodasODE")
+        run_case("dd", 0, rtol=1e-8)
+
+        # not with_jacobian: nothing decided, nothing forced
+        opts["with_jacobian"] = False
+        model.reset()
+        alg = NoSolveAlg(0.0, 1.0, (), model, opts)
+        assert alg.jacobian_mode is None
+        assert model.force_finite_differences == 0
+
+        # the model attribute is restored after the simulation
+        opts["with_jacobian"] = True
+        opts["jacobian_mode"] = "fd"
+        model.reset()
+        alg = NoSolveAlg(0.0, 1.0, (), model, opts)
+        assert model.force_finite_differences is True
+        alg.solve()
+        alg.get_result()
+        assert model.force_finite_differences == 0
+
+        opts["jacobian_mode"] = "central"
+        with pytest.raises(InvalidOptionException):
+            NoSolveAlg(0.0, 1.0, (), model, opts)
+
     def test_sparse_option(self):
 
         def run_case(expected_jacobian, expected_sparse, fnbr=0, nnz={}, set_sparse=False):
