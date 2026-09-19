@@ -959,6 +959,45 @@ class Test_FMUModelME2:
         fmu.simulate()
 
 
+    def test_fd_kink_guard(self):
+        """Forward differences across a kink give jump/h; the guard detects them with a second
+        step and replaces them by the backward difference (no directional derivatives here)."""
+        model = Dummy_FMUModelME2([], os.path.join(file_path, "files", "FMUs", "XML", "ME2.0", "LinearStateSpace.fmu"), _connect_dll=False)
+        x1 = model.variables["x[1]"].value_reference
+        x2 = model.variables["x[2]"].value_reference
+        d1 = model.variables["der(x[1])"].value_reference
+        d2 = model.variables["der(x[2])"].value_reference
+        kink_at = [None]
+
+        def f(*args, **kwargs):
+            v1, v2 = model.values[x1], model.values[x2]
+            jump = 1.0 if (kink_at[0] is not None and v1 > kink_at[0]) else 0.0   # step of size 1 just above x1
+            model.values[d1] = -v1 + jump
+            model.values[d2] = -v2 + 2.0 * v1
+            return np.array([model.values[d1], model.values[d2]])
+        model.get_derivatives = f
+        model.initialize(); model.event_update(); model.enter_continuous_time_mode()
+        model.continuous_states = np.array([1.0, 1.0]); model.values[x1] = 1.0; model.values[x2] = 1.0
+
+        # smooth: the guard checks every group on the first evaluation and changes nothing
+        A = model._get_A(add_diag=True).toarray()
+        assert np.allclose(A, [[-1.0, 0.0], [2.0, -1.0]]), A
+        assert model._fd_guard_stats["kink_entries"] == 0 and model._fd_guard_stats["checked_groups"] >= 1
+
+        # a kink right above x1: the forward difference sees the jump (1/eps ~ 6.7e7)
+        kink_at[0] = 1.0 + 0.5 * np.sqrt(np.finfo(float).eps)
+        model.fd_kink_guard = False
+        A_raw = model._get_A(add_diag=True).toarray()
+        assert A_raw[0, 0] > 1e6, A_raw
+        model.fd_kink_guard = True
+        A_guarded = model._get_A(add_diag=True).toarray()
+        assert np.allclose(A_guarded, [[-1.0, 0.0], [2.0, -1.0]]), A_guarded
+        assert model._fd_guard_stats["kink_entries"] >= 1
+
+        # off: the raw column comes through
+        model.fd_kink_guard = False
+        assert model._get_A(add_diag=True).toarray()[0, 0] > 1e6
+
 @pytest.mark.assimulo
 class Test_FMUModelBase2:
     def test_relative_quantity(self):
