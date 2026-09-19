@@ -139,16 +139,14 @@ class AssimuloFMIAlgOptions(OptionBase):
             that was used is available as the 'jacobian_mode' attribute of
             the algorithm object.
 
-            "fd"/"auto" is an opt-in: on FMUs whose directional derivatives
-            cost more than an rhs evaluation it halves the simulation time
-            of CVode and Radau5ODE on 100-300 state models at unchanged
-            accuracy, but on one model with a region where rhs evaluations
-            fail (steam tables) the finite-difference Jacobian led to
-            accepted steps far off the converged solution at rtol 1e-6 and
-            5e-7 (not at 2e-7, 1e-7), which no check at initialization
-            detects. Verify results against a "dd" run once per model
-            before relying on "fd".
-            Default: "dd"
+            On FMUs whose directional derivatives cost more than an rhs
+            evaluation "fd" halves the simulation time of CVode and
+            Radau5ODE on 100-300 state models at unchanged accuracy. The
+            finite differences are protected by a kink guard
+            (FMUModelME2.fd_kink_guard): without it a difference taken
+            across a kink of the model (a limiter, a property-function
+            region boundary) corrupts the Newton matrix for many steps.
+            Default: "auto"
 
         dynamic_diagnostics --
             If True, enables logging of diagnostics data to a result file. This requires that
@@ -285,7 +283,7 @@ class AssimuloFMIAlgOptions(OptionBase):
             'write_scaled_result':False,
             'result_file_name':'',
             'with_jacobian':"Default",
-            'jacobian_mode':"dd",
+            'jacobian_mode':"auto",
             'logging':False,
             'dynamic_diagnostics':False,
             'result_handling':"binary",

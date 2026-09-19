@@ -409,7 +409,7 @@ class Test_FMUModelME2_Simulation:
 
         caps["providesDirectionalDerivatives"] = True
         model._provides_directional_derivatives = lambda: True
-        assert model.simulate_options()["jacobian_mode"] == "dd"     # the default keeps the directional derivatives
+        assert model.simulate_options()["jacobian_mode"] == "auto"
         opts["jacobian_mode"] = "dd"
         run_case("dd", 0)
         opts["jacobian_mode"] = "fd"
