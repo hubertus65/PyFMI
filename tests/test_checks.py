@@ -151,3 +151,19 @@ class TestCompareResults:
         assert main(["compare", "vdp_ref.mat", "vdp_loose.mat", "--vars", "^x", "--threshold", "1e-9",
                      "--group", "states=^x"]) == 1
         assert "states" in capsys.readouterr().out
+
+
+class TestOctBlockCheck:
+    def test_not_an_oct_fmu(self, vanderpol):
+        from pyfmi.checks import enable_oct_block_jacobian_check
+        assert enable_oct_block_jacobian_check(vanderpol) is False
+
+    def test_count_warnings(self, tmp_path):
+        from pyfmi.checks import count_oct_block_warnings
+        log = tmp_path / "x.log"
+        log.write_text(
+            'FMIL: [WARNING] <SingularJacobian category="warning">Singular Jacobian detected for <value name="dir_block">"36"</value> at t</SingularJacobian>\n'
+            'FMIL: [WARNING] <SingularJacobian category="warning">Singular Jacobian detected for <value name="dir_block">"36"</value> at t</SingularJacobian>\n'
+            'FMIL: [WARNING] <SingularJacobian category="warning">Singular Jacobian detected for <value name="block">"7"</value></SingularJacobian>\n'
+            'FMIL: [WARNING] <SingularJacobian category="warning">Singular Jacobian detected for <value name="dir_block">"9"</value> at t</SingularJacobian>\n')
+        assert count_oct_block_warnings(str(log)) == {"36": 2, "9": 1}
