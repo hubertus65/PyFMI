@@ -290,6 +290,16 @@ class AssimuloFMIAlgOptions(OptionBase):
         external_event_detection --
             As for CVode (False: ARKODE's rootfinding).
             Default: False
+
+        fallback_table, fallback_conv_fail_rate, fallback_window --
+            When more than fallback_conv_fail_rate of the last fallback_window
+            step attempts failed by Newton non-convergence (a rhs with a jump
+            the solution rides on), the run continues with the 2-stage
+            Butcher table fallback_table (None disables the fallback).
+            Defaults: 'ARKODE_TRBDF2_3_3_2', 0.25, 50
+
+        Every other ARKODE property (predictor, max_nonlin_iters, ...) can be
+        added to the dictionary and is passed through.
     Options for Radau5ODE::
 
         rtol, atol, maxh --
@@ -328,7 +338,8 @@ class AssimuloFMIAlgOptions(OptionBase):
             'Radau5ODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default","thet":"Default"},
             'TRBDF2_options':{'atol':"Default",'rtol':"Default","maxh":"Default"},
             'ARKODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default",'method':'implicit','order':4,'table':None,
-                              'external_event_detection':False},
+                              'external_event_detection':False, 'fallback_table':'ARKODE_TRBDF2_3_3_2',
+                              'fallback_conv_fail_rate':0.25, 'fallback_window':50},
             'RungeKutta34_options':{'atol':"Default",'rtol':"Default"},
             'Dopri5_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
             'RodasODE_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},

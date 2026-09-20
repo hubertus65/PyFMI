@@ -556,7 +556,8 @@ class Test_FMUModelME2_Simulation:
         model = Dummy_FMUModelME2([], os.path.join(file_path, "files", "FMUs", "XML", "ME2.0", "NoState.Example1.fmu"), _connect_dll=False)
         opts = model.simulate_options()
         opts["result_handling"] = None
-        for solver, extra in (("TRBDF2", {}), ("ARKODE", {"method": "explicit", "order": 3, "table": None})):
+        for solver, extra in (("TRBDF2", {}), ("ARKODE", {"method": "explicit", "order": 3, "table": None}),
+                              ("ARKODE", {"fallback_table": None, "fallback_conv_fail_rate": 0.4, "fallback_window": 20})):
             if not hasattr(assimulo.solvers, solver):
                 continue
             model.reset()
