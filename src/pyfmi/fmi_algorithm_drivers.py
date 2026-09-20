@@ -47,7 +47,7 @@ PYFMI_JACOBIAN_LIMIT = 10
 # 2x slower, 226/318 states (density 0.13-0.24) a wash, 16-state switched circuit 8x slower.
 PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT = 1000
 PYFMI_JACOBIAN_SPARSE_NNZ_LIMIT  = 0.15 #In percentage
-PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE") # get with_jacobian by default (see below)
+PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE", "TRBDF2") # get with_jacobian by default (see below)
 PYFMI_SPARSE_JACOBIAN_SOLVERS = ("CVode", "Radau5ODE")             # ... and support linear_solver = "SPARSE"
 
 # jacobian_mode = "auto": use coloured finite differences instead of the FMU's directional
@@ -261,6 +261,10 @@ class AssimuloFMIAlgOptions(OptionBase):
             The iteration method. Can be either 'Newton' or 'FixedPoint'
             Default: 'Newton'
 
+    Options for TRBDF2 (Assimulo >= 3.9, TR-BDF2 with Assimulo's event locator)::
+
+        rtol, atol, maxh --
+            As for CVode.
     Options for Radau5ODE::
 
         rtol, atol, maxh --
@@ -297,6 +301,7 @@ class AssimuloFMIAlgOptions(OptionBase):
             'CVode_options':{'discr':'BDF','iter':'Newton',
                             'atol':"Default",'rtol':"Default","maxh":"Default",'external_event_detection':False},
             'Radau5ODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default","thet":"Default"},
+            'TRBDF2_options':{'atol':"Default",'rtol':"Default","maxh":"Default"},
             'RungeKutta34_options':{'atol':"Default",'rtol':"Default"},
             'Dopri5_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
             'RodasODE_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
