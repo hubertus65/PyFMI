@@ -1,5 +1,26 @@
 --- CHANGELOG ---
 --- PyFMI-FUTURE ---
+    * Jacobian handling for Model Exchange FMUs (`AssimuloFMIAlg`):
+        * `with_jacobian` now defaults to True for Radau5ODE and RodasODE as well (was only CVode),
+          so these solvers use the structure-aware (coloured) Jacobian of PyFMI.
+        * New simulation option `jacobian_mode` ("auto" | "dd" | "fd"): evaluate the Jacobian from
+          the FMU's directional derivatives or by coloured forward differences. "auto" (default)
+          times one directional-derivative call against one rhs evaluation at initialization and
+          picks the cheaper one, except for RodasODE, the sparse linear solver and rtol < 1e-7.
+        * The finite-difference Jacobian is protected by a kink guard (`FMUModelME2.fd_kink_guard`,
+          default True): differences taken across a kink of the model are detected with a second
+          step and replaced, instead of entering the Newton matrix as jump/h.
+        * Radau5ODE option `thet` defaults to 0.1 when the PyFMI Jacobian is used (Assimulo's 1e-3
+          recomputes the Jacobian after almost every step).
+        * The sparse linear solver is chosen by default from 1000 states (was 100).
+        * `maxh = None` (or 0.0) removes the default step cap of (final_time-start_time)/ncp.
+    * New module `pyfmi.checks` with a command line (`python -m pyfmi.checks`):
+        * `check_jacobian` compares an FMU's directional derivatives against forward and central
+          finite differences along a trajectory and reports missing or wrong entries; on OCT FMUs
+          `--oct-block-check` also reports nonlinear blocks whose directional-derivative solve had
+          a singular Jacobian.
+        * `compare_results` reports the deviation between two results per variable and per
+          variable group (by default controller-like names against the rest).
 
 --- PyFMI-2.23.0 ---
     * Fixed an exception when using `dynamic_diagnostics` for FMUs with `unbounded = True` states.
