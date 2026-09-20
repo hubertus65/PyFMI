@@ -549,6 +549,25 @@ class Test_FMUModelME2_Simulation:
         run_case(0,1,"Dopri5")
         run_case(0,1,"RodasODE")
         run_case(0,1,"LSODAR")
+
+    def test_onestep_solver_options(self):
+        """TRBDF2 and ARKODE are selectable by name, get the PyFMI Jacobian by default and pass their options through."""
+        import assimulo.solvers
+        model = Dummy_FMUModelME2([], os.path.join(file_path, "files", "FMUs", "XML", "ME2.0", "NoState.Example1.fmu"), _connect_dll=False)
+        opts = model.simulate_options()
+        opts["result_handling"] = None
+        for solver, extra in (("TRBDF2", {}), ("ARKODE", {"method": "explicit", "order": 3, "table": None})):
+            if not hasattr(assimulo.solvers, solver):
+                continue
+            model.reset()
+            opts["solver"] = solver
+            opts[solver + "_options"]["rtol"] = 1e-5
+            opts[solver + "_options"].update(extra)
+            alg = NoSolveAlg(0.0, 2.0, (), model, opts)
+            assert alg.simulator.rtol == 1e-5
+            assert alg.simulator.maxh == pytest.approx(2.0 / 500)
+            for k, v in extra.items():
+                assert getattr(alg.simulator, k) == v, (k, getattr(alg.simulator, k))
     
     def test_rtol_auto_update(self):
         """ Test that default rtol picks up the unbounded attribute. """

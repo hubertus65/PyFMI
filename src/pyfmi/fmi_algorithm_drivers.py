@@ -47,7 +47,7 @@ PYFMI_JACOBIAN_LIMIT = 10
 # 2x slower, 226/318 states (density 0.13-0.24) a wash, 16-state switched circuit 8x slower.
 PYFMI_JACOBIAN_SPARSE_SIZE_LIMIT = 1000
 PYFMI_JACOBIAN_SPARSE_NNZ_LIMIT  = 0.15 #In percentage
-PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE", "TRBDF2") # get with_jacobian by default (see below)
+PYFMI_JACOBIAN_SOLVERS        = ("CVode", "Radau5ODE", "RodasODE", "TRBDF2", "ARKODE") # get with_jacobian by default (see below)
 PYFMI_SPARSE_JACOBIAN_SOLVERS = ("CVode", "Radau5ODE")             # ... and support linear_solver = "SPARSE"
 
 # jacobian_mode = "auto": use coloured finite differences instead of the FMU's directional
@@ -265,6 +265,31 @@ class AssimuloFMIAlgOptions(OptionBase):
 
         rtol, atol, maxh --
             As for CVode.
+
+    Options for ARKODE (Assimulo >= 3.9 with SUNDIALS >= 7.1; SUNDIALS ARKODE's
+    Runge-Kutta methods with ARKODE's rootfinding for state events)::
+
+        rtol, atol, maxh --
+            As for CVode.
+
+        method  --
+            'implicit' (diagonally implicit RK, Newton with the Jacobian) or
+            'explicit' (explicit RK, for non-stiff models).
+            Default: 'implicit'
+
+        order   --
+            The method order (implicit 2-5, explicit 2-9); ARKODE's default
+            Butcher table of that order unless 'table' names one.
+            Default: 4
+
+        table   --
+            Name of an ARKODE Butcher table, e.g. 'ARKODE_TRBDF2_3_3_2';
+            overrides 'order'.
+            Default: None
+
+        external_event_detection --
+            As for CVode (False: ARKODE's rootfinding).
+            Default: False
     Options for Radau5ODE::
 
         rtol, atol, maxh --
@@ -302,6 +327,8 @@ class AssimuloFMIAlgOptions(OptionBase):
                             'atol':"Default",'rtol':"Default","maxh":"Default",'external_event_detection':False},
             'Radau5ODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default","thet":"Default"},
             'TRBDF2_options':{'atol':"Default",'rtol':"Default","maxh":"Default"},
+            'ARKODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default",'method':'implicit','order':4,'table':None,
+                              'external_event_detection':False},
             'RungeKutta34_options':{'atol':"Default",'rtol':"Default"},
             'Dopri5_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
             'RodasODE_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
