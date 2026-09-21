@@ -38,6 +38,12 @@ cdef class FMIODE2(cExplicit_Problem):
     cdef public FMI2.FMUModelME2 model_me2
     cdef public int model_me2_instance
     cdef public np.ndarray _state_temp_1, _event_temp_1
+    # implicit/explicit partition for ARKODE's imex mode (set_implicit_partition)
+    cdef public object rhs_implicit, rhs_explicit, implicit_blocks
+    cdef public int _partition_active, _partition_partial
+    cdef public object _part_implicit_idx, _part_explicit_idx, _part_implicit_vrefs, _part_explicit_vrefs
+    cdef public object _part_state_vrefs, _part_der_vrefs, _part_group, _part_A
+    cdef public object _part_cache_t, _part_cache_y, _part_cache_der
 
     cdef int _logging_as_dynamic_diagnostics
     cdef int _number_of_diagnostics_variables

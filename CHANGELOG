@@ -1,5 +1,16 @@
 --- CHANGELOG ---
 --- PyFMI-FUTURE ---
+    * ARKODE's implicit-explicit mode for Model Exchange FMUs (`ARKODE_options`, with
+      `method = "imex"`): `implicit_states` names the states of the stiff part (variable names,
+      glob patterns or indices); their derivatives are the implicit part, the rest the explicit
+      part. The FMU's derivative dependencies split the implicit states into blocks whose
+      derivatives do not depend on each other's states, the Newton matrix is then factored
+      block by block (ARKODE `linear_solver = "BLOCK"`, chosen by default for more than one
+      block), and the implicit Jacobian is coloured on its rows alone. `implicit_blocks` may
+      merge derived blocks (never split one; validated); `partial_rhs` chooses between get_real
+      requests per part (cheap on an FMU compiled with lazy evaluation) and one cached full
+      evaluation per point, by a timing probe at initialization ("auto"). The problem class
+      side is `FMIODE2.set_implicit_partition`. FMI 2.0 ME only so far.
     * Jacobian handling for Model Exchange FMUs (`AssimuloFMIAlg`):
         * `with_jacobian` now defaults to True for Radau5ODE and RodasODE as well (was only CVode),
           so these solvers use the structure-aware (coloured) Jacobian of PyFMI.

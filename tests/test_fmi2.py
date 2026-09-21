@@ -570,6 +570,87 @@ class Test_FMUModelME2_Simulation:
             for k, v in extra.items():
                 assert getattr(alg.simulator, k) == v, (k, getattr(alg.simulator, k))
     
+    def test_arkode_imex_partition(self):
+        """ARKODE's imex mode on a real FMU: 'implicit_states' by name and glob, the derived
+        blocks, the partial/full rhs paths and the implicit Jacobian; the result matches the
+        fully implicit run, and the partition options are validated."""
+        import assimulo.solvers
+        if not hasattr(assimulo.solvers, "ARKODE"):
+            pytest.skip("Assimulo without ARKODE")
+        fmu = Path(file_path) / "files" / "reference_fmus" / "2.0" / "VanDerPol.fmu"
+        if not fmu.exists():
+            pytest.skip("reference FMUs not unpacked")
+
+        def run(**arkode):
+            model = FMUModelME2(str(fmu), _connect_dll=True, log_level=0)
+            opts = model.simulate_options()
+            opts["solver"] = "ARKODE"
+            opts["ncp"] = 50
+            opts["result_handling"] = "memory"
+            opts["ARKODE_options"].update(arkode)
+            return model.simulate(final_time=5.0, options=opts)
+
+        ref = run(method="implicit")
+        for extra in (dict(implicit_states=["x1"]), dict(implicit_states=["x1"], partial_rhs=False),
+                      dict(implicit_states=[1], partial_rhs=True), dict(implicit_states="x1", implicit_blocks=[["x1"]])):
+            res = run(method="imex", **extra)
+            assert np.max(np.abs(res["x0"] - ref["x0"])) < 1e-3, extra
+            assert res.solver.statistics["nfcns_implicit"] > 0
+            assert res.solver.method == "imex"
+            part = res.solver.problem.get_implicit_partition()
+            assert list(part[0]) == [1] and list(part[1]) == [0] and len(part[2]) == 1
+            assert res.solver.linear_solver == "DENSE"      # one block: no need for the block solver
+
+        # validation
+        with pytest.raises(InvalidOptionException, match="no state matches"):
+            run(method="imex", implicit_states=["nosuchstate"])
+        with pytest.raises(InvalidOptionException, match="needs 'implicit_states'"):
+            run(method="imex")
+        with pytest.raises(InvalidOptionException, match="need ARKODE's method 'imex'"):
+            run(method="implicit", implicit_states=["x1"])
+        with pytest.raises(InvalidOptionException, match="partition exactly"):
+            run(method="imex", implicit_states=["x1"], implicit_blocks=[["x0"]])
+        with pytest.raises(InvalidOptionException, match="names every state"):
+            run(method="imex", implicit_states=["x*"])
+
+    def test_arkode_imex_blocks_from_dependencies(self):
+        """The blocks of the implicit partition come from the FMU's derivative dependencies
+        (CoupledClutches: clutch1.phi_rel depends on its own w_rel only, the w_rel's on each
+        other), and a user split of dependent states is refused."""
+        import assimulo.solvers
+        if not hasattr(assimulo.solvers, "ARKODE"):
+            pytest.skip("Assimulo without ARKODE")
+        model = Dummy_FMUModelME2([], FMU_PATHS.ME2.coupled_clutches, _connect_dll=False)
+        opts = model.simulate_options()
+        opts["solver"] = "ARKODE"
+        opts["result_handling"] = None
+        opts["ARKODE_options"].update(method="imex", partial_rhs=False)
+        names = list(model.get_states_list().keys())
+
+        def alg(**extra):
+            model.reset()
+            o = opts.copy(); o["ARKODE_options"] = dict(opts["ARKODE_options"], **extra)
+            return NoSolveAlg(0.0, 1.0, (), model, o)
+
+        # phi_rel states depend only on their own w_rel: three one-state blocks when the w's are explicit
+        a = alg(implicit_states=["clutch*.phi_rel"])
+        imp, exp, blocks, partial = a.probl.get_implicit_partition()
+        assert [names[i] for i in imp] == ["clutch1.phi_rel", "clutch2.phi_rel", "clutch3.phi_rel"]
+        assert [list(b) for b in blocks] == [[0], [2], [4]]
+        assert partial is False
+        assert a.simulator.linear_solver == "BLOCK"
+        # the w_rel's depend on each other: one block, which a user split may not separate
+        a = alg(implicit_states=["clutch*.w_rel"])
+        assert [list(b) for b in a.probl.get_implicit_partition()[2]] == [[1, 3, 5]]
+        assert a.simulator.linear_solver == "DENSE"
+        with pytest.raises(InvalidOptionException, match="depend on each other"):
+            alg(implicit_states=["clutch*.w_rel"], implicit_blocks=[["clutch1.w_rel"], ["clutch2.w_rel", "clutch3.w_rel"]])
+        # a user merge of independent blocks is allowed
+        a = alg(implicit_states=["clutch*.phi_rel"], implicit_blocks=[["clutch1.phi_rel", "clutch2.phi_rel"], ["clutch3.phi_rel"]])
+        assert [list(b) for b in a.probl.get_implicit_partition()[2]] == [[0, 2], [4]]
+        # the implicit Jacobian's colouring: phi rows only, one seed per w_rel column is enough
+        assert len(a.probl._part_group["groups"]) <= 3
+
     def test_rtol_auto_update(self):
         """ Test that default rtol picks up the unbounded attribute. """
         model = Dummy_FMUModelME2([], FMU_PATHS.ME2.coupled_clutches_modified, _connect_dll=False)

@@ -21,6 +21,7 @@ pyfmi.fmi*.FMUModel*.simulate.
 
 import logging as logging_module
 import time
+import fnmatch
 import numpy as np
 import scipy.optimize as spopt
 
@@ -298,6 +299,33 @@ class AssimuloFMIAlgOptions(OptionBase):
             Butcher table fallback_table (None disables the fallback).
             Defaults: 'ARKODE_TRBDF2_3_3_2', 0.25, 50
 
+        implicit_states --
+            With method 'imex': the states whose derivatives form the implicit
+            (stiff) part, as a list of state variable names or glob patterns
+            (e.g. ['suspension*', 'tire[*'] or state indices; the rest is the
+            explicit part. The derivative dependencies of the FMU split the
+            implicit states into blocks that do not depend on each other's
+            states (several fast subsystems that only interact through the
+            explicit part, e.g. a vehicle's suspensions through the body); the
+            Newton matrix is then factored block by block (ARKODE's
+            linear_solver 'BLOCK', the default when there is more than one
+            block) and the implicit Jacobian is coloured on its rows alone.
+            Default: None
+
+        implicit_blocks --
+            Overrides the derived blocks: a list of lists of state names or
+            patterns, each a block. A given block may merge derived blocks
+            but never split one; validated against the dependencies.
+            Default: None (derived)
+
+        partial_rhs --
+            How the two parts of the rhs are evaluated: True, each part as a
+            get_real request on its derivatives (cheap only on an FMU compiled
+            with lazy evaluation); False, one full rhs evaluation per point
+            serves both parts; 'auto', decided by timing a partial request
+            against a full evaluation at initialization (partial if below half).
+            Default: 'auto'
+
         Every other ARKODE property (predictor, max_nonlin_iters, ...) can be
         added to the dictionary and is passed through.
     Options for Radau5ODE::
@@ -339,7 +367,8 @@ class AssimuloFMIAlgOptions(OptionBase):
             'TRBDF2_options':{'atol':"Default",'rtol':"Default","maxh":"Default"},
             'ARKODE_options':{'atol':"Default",'rtol':"Default","maxh":"Default",'method':'implicit','order':4,'table':None,
                               'external_event_detection':False, 'fallback_table':'ARKODE_TRBDF2_3_3_2',
-                              'fallback_conv_fail_rate':0.25, 'fallback_window':50},
+                              'fallback_conv_fail_rate':0.25, 'fallback_window':50,
+                              'implicit_states':None, 'implicit_blocks':None, 'partial_rhs':'auto'},
             'RungeKutta34_options':{'atol':"Default",'rtol':"Default"},
             'Dopri5_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
             'RodasODE_options':{'atol':"Default",'rtol':"Default", "maxh":"Default"},
@@ -717,6 +746,129 @@ class AssimuloFMIAlg(AlgorithmBase):
         if self.jacobian_mode is not None:
             self.model.force_finite_differences = self._force_finite_differences_prev
 
+    # ------------------------------------------------------------------ ARKODE imex partition
+    def _resolve_state_selection(self, spec, what):
+        """State indices for a list of state names, glob patterns or indices."""
+        names = list(self.model.get_states_list().keys())
+        if isinstance(spec, (str, int, np.integer)):
+            spec = [spec]
+        idx = set()
+        for item in spec:
+            if isinstance(item, (int, np.integer)):
+                if not 0 <= int(item) < len(names):
+                    raise InvalidOptionException("'%s': state index %d is outside 0..%d." % (what, item, len(names) - 1))
+                idx.add(int(item))
+            else:
+                matched = [i for i, n in enumerate(names) if n == item or fnmatch.fnmatchcase(n, str(item))]
+                if not matched:
+                    raise InvalidOptionException("'%s': no state matches '%s'." % (what, item))
+                idx.update(matched)
+        return sorted(idx)
+
+    def _derive_implicit_blocks(self, implicit):
+        """The connected components of the undirected dependency graph among the implicit
+        states (an edge where either state's derivative depends on the other): blocks whose
+        Newton matrices are independent."""
+        derv_state_dep, _ = self.model.get_derivatives_dependencies()
+        names = list(self.model.get_states_list().keys())
+        ders = list(self.model.get_derivatives_list().keys())
+        pos = {n: i for i, n in enumerate(names)}
+        parent = {i: i for i in implicit}
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in implicit:
+            for dep in derv_state_dep.get(ders[i], []):
+                j = pos.get(dep)
+                if j is not None and j in parent and j != i:
+                    parent[find(i)] = find(j)
+        comps = {}
+        for i in implicit:
+            comps.setdefault(find(i), []).append(i)
+        return sorted((sorted(c) for c in comps.values()), key=lambda c: c[0])
+
+    def _set_imex_partition(self, solver_options):
+        """Turns the PyFMI-level options implicit_states / implicit_blocks / partial_rhs into
+        the problem's partition (FMIODE2.set_implicit_partition) and ARKODE's linear solver."""
+        spec = solver_options.pop("implicit_states", None)
+        blocks_spec = solver_options.pop("implicit_blocks", None)
+        partial = solver_options.pop("partial_rhs", "auto")
+        if solver_options.get("method", "implicit") != "imex":
+            if spec is not None or blocks_spec is not None:
+                raise InvalidOptionException("'implicit_states' / 'implicit_blocks' need ARKODE's method 'imex'.")
+            return
+        if spec is None:
+            raise InvalidOptionException("ARKODE's method 'imex' needs 'implicit_states' (the states of the stiff part).")
+        if not isinstance(self.model, FMUModelME2):
+            raise InvalidOptionException("ARKODE's method 'imex' is only available for FMUModelME2 (FMI 2.0 ME) so far.")
+        if not hasattr(self.probl, "set_implicit_partition"):
+            raise InvalidOptionException("ARKODE's method 'imex' is not available for this problem class.")
+
+        implicit = self._resolve_state_selection(spec, "implicit_states")
+        if len(implicit) == len(self.model.get_states_list()):
+            raise InvalidOptionException("'implicit_states' names every state; use ARKODE's method 'implicit' instead.")
+        derived = self._derive_implicit_blocks(implicit)
+        if blocks_spec is None:
+            blocks = derived
+        else:
+            blocks = [self._resolve_state_selection(b, "implicit_blocks") for b in blocks_spec]
+            flat = sorted(i for b in blocks for i in b)
+            if flat != sorted(set(flat)) or flat != implicit:
+                raise InvalidOptionException("'implicit_blocks' must partition exactly the states of 'implicit_states'.")
+            block_of = {i: k for k, b in enumerate(blocks) for i in b}
+            names = list(self.model.get_states_list().keys())
+            for comp in derived:
+                owners = {block_of[i] for i in comp}
+                if len(owners) > 1:
+                    i, j = comp[0], next(k for k in comp if block_of[k] != block_of[comp[0]])
+                    raise InvalidOptionException("'implicit_blocks' separates '%s' and '%s', whose derivatives depend "
+                                                 "on each other according to the FMU." % (names[i], names[j]))
+
+        if partial == "auto":
+            t_part, t_full = self._probe_partial_rhs_cost(implicit)
+            partial = bool(t_part < 0.5 * t_full)
+            probe = " (probe: partial %.3g s, full %.3g s)" % (t_part, t_full)
+        else:
+            partial = bool(partial)
+            probe = ""
+        self.probl.set_implicit_partition(implicit, blocks, partial)
+        solver_options.setdefault("linear_solver", "BLOCK" if len(blocks) > 1 else "DENSE")
+        self.model.append_log_message("Model", 4, "[INFO][FMU status:OK] imex partition: %d implicit states in %d block(s) of "
+            "sizes %s, %d explicit; partial rhs %s%s; linear solver %s" % (len(implicit), len(blocks),
+            [len(b) for b in blocks], self.probl._f_nbr - len(implicit), partial, probe, solver_options["linear_solver"]))
+
+    def _probe_partial_rhs_cost(self, implicit, repeats=3):
+        """(seconds per get_real of the implicit derivatives, seconds per full rhs), minima
+        over 'repeats' calls at perturbed states, as _probe_jacobian_cost does."""
+        model = self.model
+        t = model.time
+        x = model.continuous_states.copy()
+        nominal = np.abs(model.nominal_continuous_states)
+        derivs_ref = [v.value_reference for v in model.get_derivatives_list().values()]
+        part_ref = [derivs_ref[i] for i in implicit]
+        # timed together with the state update, and every probe at a state vector not used
+        # before: an FMU serves a repeated state vector from its cache (OCT: 15 us instead of
+        # 0.6 ms on the truck), which would make the minimum over the repeats meaningless
+        t_full, t_part = np.inf, np.inf
+        for k in range(repeats):
+            model.time = t
+            t0 = timer()
+            model.continuous_states = x + (2 * k + 1) * 1e-8 * nominal
+            model.get_derivatives()
+            t_full = min(t_full, timer() - t0)
+            t0 = timer()
+            model.continuous_states = x + (2 * k + 2) * 1e-8 * nominal
+            model.get_real(part_ref)
+            t_part = min(t_part, timer() - t0)
+        model.time = t
+        model.continuous_states = x
+        model.get_derivatives()
+        return t_part, t_full
+
     def _probe_jacobian_cost(self, repeats=3):
         """
         Returns (seconds per rhs evaluation, seconds per directional-derivative call),
@@ -798,6 +950,9 @@ class AssimuloFMIAlg(AlgorithmBase):
 
         #Set solver option continuous_output
         self.simulator.report_continuously = True
+
+        if self.options["solver"] == "ARKODE":
+            self._set_imex_partition(solver_options)
 
         #If usejac is not set, try to set it according to if directional derivatives
         #exists. Also verifies that the option "usejac" exists for the solver.

@@ -30,9 +30,11 @@ import logging as logging_module
 from operator import index
 import scipy.sparse as sps
 from timeit import default_timer as timer
+from collections import OrderedDict
 
 cimport pyfmi.fmil_import as FMIL
 cimport pyfmi.fmi2 as FMI2
+cimport pyfmi.util as pyfmi_util
 from pyfmi.fmi2 import FMI2_REAL, FMI2_INPUT
 from pyfmi.exceptions import (
     FMUException,
@@ -117,6 +119,10 @@ cdef class FMIODE2(cExplicit_Problem):
         self._number_of_diagnostics_variables = number_of_diagnostics_variables
 
         self.jac_use = False
+        self._partition_active = 0
+        self.rhs_implicit = None
+        self.rhs_explicit = None
+        self.implicit_blocks = None
         if f_nbr > 0 and with_jacobian:
             self.jac_use = True # Activates the jacobian
 
@@ -274,11 +280,134 @@ cdef class FMIODE2(cExplicit_Problem):
 
         return der
 
+    # ------------------------------------------------------------------ implicit/explicit partition
+    def set_implicit_partition(self, implicit, blocks=None, partial=True):
+        """
+        Splits the rhs for ARKODE's imex mode: the derivatives of the states in
+        'implicit' (indices) are the implicit part, the rest the explicit part.
+        Afterwards 'rhs_implicit' and 'rhs_explicit' return full-length vectors
+        (zero outside their part), 'jac' returns the Jacobian of the implicit
+        part only (its rows coloured on their own, so a body whose derivative
+        depends on every fast state no longer forces one seed per fast state),
+        and 'implicit_blocks' holds 'blocks' (index arrays of implicit states
+        whose derivatives do not depend on each other's states; None: one block).
+
+        partial -- True: each part is a get_real request on its derivative value
+            references, which costs only that part on an FMU compiled with lazy
+            evaluation; False: one full rhs evaluation per (t, y), cached, serves
+            both parts (the right choice when the FMU computes everything on any
+            request).
+        """
+        if self._extra_f_nbr > 0:
+            raise FMUException("An implicit/explicit partition is not supported together with extra equations.")
+        n = self._f_nbr
+        implicit = np.unique(np.asarray(implicit, dtype=np.int64))
+        if len(implicit) == 0 or implicit[0] < 0 or implicit[-1] >= n:
+            raise FMUException("The implicit partition must be a non-empty set of state indices in 0..%d." % (n - 1))
+        mask = np.zeros(n, dtype=bool)
+        mask[implicit] = True
+        if mask.all():
+            raise FMUException("Every state is in the implicit partition; use the fully implicit method instead.")
+        explicit = np.flatnonzero(~mask)
+
+        states = self._model.get_states_list()
+        derivatives = self._model.get_derivatives_list()
+        state_names = list(states.keys())
+        state_vrefs = [v.value_reference for v in states.values()]
+        der_vrefs = [v.value_reference for v in derivatives.values()]
+        der_names = list(derivatives.keys())
+
+        # colouring of the implicit rows alone: the explicit derivatives' rows are empty
+        derv_state_dep, _ = self._model.get_derivatives_dependencies()
+        restricted = OrderedDict()
+        for i, name in enumerate(der_names):
+            restricted[name] = list(derv_state_dep[name]) if mask[i] else []
+        group = pyfmi_util.cpr_seed(restricted, state_names)
+
+        self._part_implicit_idx = implicit
+        self._part_explicit_idx = explicit
+        self._part_implicit_vrefs = [der_vrefs[i] for i in implicit]
+        self._part_explicit_vrefs = [der_vrefs[i] for i in explicit]
+        self._part_state_vrefs = state_vrefs
+        self._part_der_vrefs = der_vrefs
+        self._part_group = group
+        self._part_A = None
+        self._part_cache_t = None
+        self._part_cache_y = None
+        self._part_cache_der = None
+        self._partition_partial = 1 if partial else 0
+        self._partition_active = 1
+        self.rhs_implicit = self.rhs_implicit_part
+        self.rhs_explicit = self.rhs_explicit_part
+        if blocks is None:
+            self.implicit_blocks = [implicit]
+        else:
+            self.implicit_blocks = [np.asarray(b, dtype=np.int64) for b in blocks]
+
+    def clear_implicit_partition(self):
+        self._partition_active = 0
+        self.rhs_implicit = None
+        self.rhs_explicit = None
+        self.implicit_blocks = None
+        self._part_A = None
+        self._part_cache_der = None
+
+    def get_implicit_partition(self):
+        """(implicit state indices, explicit state indices, blocks, partial) or None."""
+        if not self._partition_active:
+            return None
+        return (self._part_implicit_idx, self._part_explicit_idx, self.implicit_blocks, bool(self._partition_partial))
+
+    def rhs_implicit_part(self, double t, np.ndarray[double, ndim=1, mode="c"] y, sw=None):
+        return self._rhs_part(t, y, 1)
+
+    def rhs_explicit_part(self, double t, np.ndarray[double, ndim=1, mode="c"] y, sw=None):
+        return self._rhs_part(t, y, 0)
+
+    def _rhs_part(self, double t, np.ndarray[double, ndim=1, mode="c"] y, int implicit):
+        cdef np.ndarray der = np.zeros(self._f_nbr)
+        idx = self._part_implicit_idx if implicit else self._part_explicit_idx
+        if self._partition_partial:
+            self._update_model(t, y)
+            vrefs = self._part_implicit_vrefs if implicit else self._part_explicit_vrefs
+            try:
+                if self.model_me2_instance:
+                    der[idx] = self.model_me2.get_real(vrefs)
+                else:
+                    der[idx] = self._model.get_real(vrefs)
+            except FMUException:
+                raise AssimuloRecoverableError
+        else:
+            # one full evaluation per point: ARKStep asks for both parts at the same (t, y)
+            if not (self._part_cache_t is not None and t == self._part_cache_t
+                    and np.array_equal(y, self._part_cache_y)):
+                self._part_cache_der = np.array(self.rhs(t, y), copy=True)
+                self._part_cache_t = t
+                self._part_cache_y = y.copy()
+            der[idx] = self._part_cache_der[idx]
+        return der
+
+    def _jac_implicit(self, double t, np.ndarray[double, ndim=1, mode="c"] y):
+        """The Jacobian of the implicit part: the explicit rows are zero and were never
+        seeded, the implicit rows come from the FMU's directional derivatives or the
+        (kink-guarded) finite differences as configured on the model."""
+        self._update_model(t, y)
+        try:
+            A = self._model._get_directional_proxy(self._part_state_vrefs, self._part_der_vrefs, self._part_group,
+                                                   add_diag=True, output_matrix=self._part_A)
+        except FMUException:
+            raise AssimuloRecoverableError
+        if self._part_A is None:
+            self._part_A = A
+        return A
+
     def jac(self, double t, np.ndarray[double, ndim=1, mode="c"] y, sw=None):
         """
         The jacobian function for an ODE problem.
         """
         log_requires_closing_tag = False
+        if self._partition_active:
+            return self._jac_implicit(t, y)
         
         if self._logging:
             preface = "[INFO][FMU status:OK] "
