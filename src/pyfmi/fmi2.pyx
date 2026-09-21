@@ -4297,7 +4297,7 @@ cdef class FMUModelME2(FMUModelBase2):
         self._fd_guard_prev = None
         self._fd_guard_prev_max = 0.0
         self._fd_guard_cur = None
-        self._fd_guard_stats = {"evaluations": 0, "checked_groups": 0, "kink_entries": 0, "dd_substitutions": 0}
+        self._fd_guard_stats = {"evaluations": 0, "checked_groups": 0, "kink_entries": 0, "dd_substitutions": 0, "probe_failures": 0}
 
         # State nominals retrieved before initialization
         self._preinit_nominal_continuous_states = None
@@ -4989,7 +4989,13 @@ cdef class FMUModelME2(FMUModelBase2):
                     self.set_real(v_ref[vars_], base)
                 return sign * (z - dfr) / (ratio * h_col)
 
-            small = quotient(1.0, FD_GUARD_STEP_RATIO)
+            try:
+                small = quotient(1.0, FD_GUARD_STEP_RATIO)
+            except FMUException:
+                # the model refused the probe point: not a kink, and not a reason to
+                # lose the column the caller already has -- the guard steps aside
+                self._fd_guard_stats["probe_failures"] += 1
+                return None
             tiny = 1e-12 * max(float(np.max(np.abs(cur))), 1e-300)
             kink = np.abs(small - cur) > FD_GUARD_REL * np.maximum(np.abs(cur), np.abs(small)) + tiny
             if not kink.any():
